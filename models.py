@@ -30,3 +30,14 @@ class IgDirectItem:
     media_download_url: Optional[str] = None
     author_username: Optional[str] = None
     replied_to_item_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class PreparedTelegramVideo:
+    """Immutable DTO holding normalized H.264 MP4 path, thumbnail path, and stream dimensions."""
+
+    video_path: str
+    thumb_path: Optional[str]
+    width: int
+    height: int
+    duration: int

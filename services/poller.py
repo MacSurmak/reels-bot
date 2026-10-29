@@ -22,7 +22,7 @@ from loguru import logger
 
 from config import cfg
 from lexicon import t
-from models import IgDirectItem, IgItemType
+from models import IgDirectItem, IgItemType, PreparedTelegramVideo
 from services.ig_client import ig_bridge
 from storage import (
     STATE_KEY_LAST_ITEM_ID,
@@ -92,17 +92,23 @@ async def _deliver_item_to_telegram(
             url=safe_url,
         )
         if item.media_download_url:
-            temp_video_path: Optional[str] = None
+            prepared: Optional[PreparedTelegramVideo] = None
             try:
-                temp_video_path = await asyncio.to_thread(
-                    ig_bridge.download_media_to_temp,
-                    item.media_download_url,
-                    item.item_id,
-                    ".mp4",
+                prepared = await asyncio.to_thread(
+                    ig_bridge.prepare_video_for_telegram,
+                    item,
                 )
                 sent_msg = await bot.send_video(
                     chat_id=OWNER_CHAT_ID,
-                    video=FSInputFile(temp_video_path),
+                    video=FSInputFile(prepared.video_path),
+                    thumbnail=(
+                        FSInputFile(prepared.thumb_path)
+                        if prepared.thumb_path
+                        else None
+                    ),
+                    width=prepared.width,
+                    height=prepared.height,
+                    duration=prepared.duration,
                     caption=caption,
                     reply_to_message_id=reply_to_tg_id,
                     supports_streaming=True,
@@ -114,7 +120,9 @@ async def _deliver_item_to_telegram(
                     "Falling back to link card."
                 )
             finally:
-                _remove_temp_file_safely(temp_video_path)
+                if prepared is not None:
+                    _remove_temp_file_safely(prepared.video_path)
+                    _remove_temp_file_safely(prepared.thumb_path)
 
         fallback_text = t(
             "ig_in_reel_fallback_link",
@@ -209,17 +217,23 @@ async def _deliver_item_to_telegram(
 
     # 4. Direct Video
     if item.item_type == IgItemType.VIDEO and item.media_download_url:
-        temp_vid_path: Optional[str] = None
+        prepared_vid: Optional[PreparedTelegramVideo] = None
         try:
-            temp_vid_path = await asyncio.to_thread(
-                ig_bridge.download_media_to_temp,
-                item.media_download_url,
-                item.item_id,
-                ".mp4",
+            prepared_vid = await asyncio.to_thread(
+                ig_bridge.prepare_video_for_telegram,
+                item,
             )
             sent_msg = await bot.send_video(
                 chat_id=OWNER_CHAT_ID,
-                video=FSInputFile(temp_vid_path),
+                video=FSInputFile(prepared_vid.video_path),
+                thumbnail=(
+                    FSInputFile(prepared_vid.thumb_path)
+                    if prepared_vid.thumb_path
+                    else None
+                ),
+                width=prepared_vid.width,
+                height=prepared_vid.height,
+                duration=prepared_vid.duration,
                 caption=t(
                     "ig_in_video_caption",
                     sender=sender_escaped,
@@ -230,7 +244,9 @@ async def _deliver_item_to_telegram(
             )
             return sent_msg.message_id
         finally:
-            _remove_temp_file_safely(temp_vid_path)
+            if prepared_vid is not None:
+                _remove_temp_file_safely(prepared_vid.video_path)
+                _remove_temp_file_safely(prepared_vid.thumb_path)
 
     # 5. Voice Message
     if item.item_type == IgItemType.VOICE and item.media_download_url:

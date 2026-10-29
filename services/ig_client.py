@@ -13,10 +13,12 @@
 import os
 import re
 import sys
+import json
+import subprocess
 import threading
 from collections import OrderedDict
 from types import SimpleNamespace
-from typing import Optional, List, Tuple, Any
+from typing import Optional, List, Tuple, Dict, Any
 import requests
 from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
@@ -31,9 +33,11 @@ from config import (
     IG_REQUEST_DELAY_MAX_SECONDS,
     MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
     MEDIA_DOWNLOAD_CHUNK_SIZE,
+    FFMPEG_TIMEOUT_SECONDS,
     TELEGRAM_MAX_VIDEO_BYTES,
+    SINGLE_PAGE_THREAD_AMOUNT,
 )
-from models import IgDirectItem, IgItemType
+from models import IgDirectItem, IgItemType, PreparedTelegramVideo
 from services.logger import setup_logger
 
 CLIENT_CONTEXT_CACHE_SIZE = 500
@@ -348,8 +352,13 @@ class InstagramBridgeClient:
                     if known_thread_id
                     else self._resolve_thread_id_locked(target_uid)
                 )
+                fetch_amount = (
+                    min(self.batch_fetch_limit, SINGLE_PAGE_THREAD_AMOUNT)
+                    if last_seen_item_id
+                    else SINGLE_PAGE_THREAD_AMOUNT
+                )
                 thread = self._client.direct_thread(
-                    int(active_thread_id), amount=self.batch_fetch_limit
+                    int(active_thread_id), amount=fetch_amount
                 )
             except InstagramBridgeError:
                 raise
@@ -723,10 +732,18 @@ class InstagramBridgeClient:
         safe_item_id = "".join(c for c in item_id if c.isalnum() or c in ("_", "-"))
         target_path = os.path.join(TMP_MEDIA_DIR, f"ig_{safe_item_id}{clean_ext}")
 
+        headers = {
+            "User-Agent": getattr(
+                self._client,
+                "user_agent",
+                "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36",
+            )
+        }
         total_bytes = 0
         try:
             with requests.get(
                 media_url.strip(),
+                headers=headers,
                 stream=True,
                 timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
             ) as resp:
@@ -761,6 +778,215 @@ class InstagramBridgeClient:
             raise InstagramBridgeError(
                 f"Failed to download media for item {item_id}: {err}"
             ) from err
+
+    @staticmethod
+    def _probe_video_stream(file_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Inspects media file via ffprobe and returns video stream metadata
+        (codec_name, pix_fmt, width, height, duration) or None if not a valid video.
+        """
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:stream=index,codec_type,codec_name,pix_fmt,width,height",
+            "-of",
+            "json",
+            file_path,
+        ]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                check=True,
+            )
+            data = json.loads(proc.stdout)
+        except Exception as err:
+            logger.warning(f"ffprobe failed on '{file_path}': {err}")
+            return None
+
+        streams = data.get("streams") or []
+        video_stream = next(
+            (s for s in streams if s.get("codec_type") == "video"), None
+        )
+        if not video_stream:
+            return None
+
+        codec_name = str(video_stream.get("codec_name") or "").lower()
+        if codec_name in ("mjpeg", "png", "webp", "gif", "bmp"):
+            return None
+
+        width = int(video_stream.get("width") or 0)
+        height = int(video_stream.get("height") or 0)
+        pix_fmt = str(video_stream.get("pix_fmt") or "").lower()
+
+        fmt_duration = data.get("format", {}).get("duration")
+        duration_sec = float(fmt_duration) if fmt_duration is not None else 0.0
+        if width <= 0 or height <= 0:
+            return None
+
+        return {
+            "codec_name": codec_name,
+            "pix_fmt": pix_fmt,
+            "width": width,
+            "height": height,
+            "duration": max(1, int(round(duration_sec))),
+        }
+
+    def prepare_video_for_telegram(
+        self, item: IgDirectItem
+    ) -> PreparedTelegramVideo:
+        """
+        Downloads an Instagram Reel/Video, verifies its stream via ffprobe,
+        transcodes VP9/AV1/HEVC streams into Telegram-compliant H.264 (yuv420p) + AAC + faststart,
+        and extracts a JPEG thumbnail.
+        """
+        if not item.media_download_url:
+            raise InstagramBridgeError(
+                f"Item {item.item_id} has no media_download_url."
+            )
+
+        raw_path: Optional[str] = None
+        norm_path: Optional[str] = None
+        thumb_path: Optional[str] = None
+
+        try:
+            raw_path = self.download_media_to_temp(
+                item.media_download_url, f"{item.item_id}_raw", ".mp4"
+            )
+            probe = self._probe_video_stream(raw_path)
+
+            # If primary URL returned a static cover image instead of video, resolve via media_info
+            if probe is None and item.public_url:
+                logger.info(
+                    f"Primary download for item {item.item_id} is not a video stream. "
+                    f"Resolving video URL via media_info for '{item.public_url}'..."
+                )
+                with self._lock:
+                    resolved_url, _, _ = (
+                        self._resolve_video_url_from_public_link_locked(
+                            item.public_url
+                        )
+                    )
+                if resolved_url and resolved_url != item.media_download_url:
+                    if os.path.exists(raw_path):
+                        os.remove(raw_path)
+                    raw_path = self.download_media_to_temp(
+                        resolved_url, f"{item.item_id}_raw", ".mp4"
+                    )
+                    probe = self._probe_video_stream(raw_path)
+
+            if probe is None:
+                raise InstagramBridgeError(
+                    f"Downloaded file for item {item.item_id} does not contain a playable video stream."
+                )
+
+            logger.info(
+                f"Probed Instagram video #{item.item_id}: codec={probe['codec_name']}, "
+                f"pix_fmt={probe['pix_fmt']}, {probe['width']}x{probe['height']}, "
+                f"duration={probe['duration']}s"
+            )
+
+            safe_id = "".join(
+                c for c in item.item_id if c.isalnum() or c in ("_", "-")
+            )
+            norm_path = os.path.join(TMP_MEDIA_DIR, f"ig_{safe_id}_h264.mp4")
+            thumb_path = os.path.join(TMP_MEDIA_DIR, f"ig_{safe_id}_thumb.jpg")
+
+            # Transcode to H.264 (yuv420p) + AAC + faststart for universal Telegram playback
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                raw_path,
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-profile:v",
+                "high",
+                "-level",
+                "4.1",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                norm_path,
+            ]
+            subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+                check=True,
+            )
+
+            final_probe = self._probe_video_stream(norm_path) or probe
+
+            # Extract first-frame JPEG thumbnail for Telegram video player preview
+            thumb_cmd = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                norm_path,
+                "-ss",
+                "00:00:00.200",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale='min(320,iw)':-2",
+                thumb_path,
+            ]
+            subprocess.run(
+                thumb_cmd,
+                capture_output=True,
+                text=True,
+                timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
+                check=False,
+            )
+            if not os.path.exists(thumb_path) or os.path.getsize(thumb_path) == 0:
+                thumb_path = None
+
+            return PreparedTelegramVideo(
+                video_path=norm_path,
+                thumb_path=thumb_path,
+                width=final_probe["width"],
+                height=final_probe["height"],
+                duration=final_probe["duration"],
+            )
+        except Exception as err:
+            for p in (norm_path, thumb_path):
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            if isinstance(err, InstagramBridgeError):
+                raise
+            raise InstagramBridgeError(
+                f"Failed to normalize video for item {item.item_id}: {err}"
+            ) from err
+        finally:
+            if raw_path and os.path.exists(raw_path):
+                try:
+                    os.remove(raw_path)
+                except OSError as rm_err:
+                    logger.warning(
+                        f"Failed to remove raw video file '{raw_path}': {rm_err}"
+                    )
 
 
 ig_bridge = InstagramBridgeClient()
