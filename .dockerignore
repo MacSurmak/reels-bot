@@ -1,0 +1,8 @@
+.git/
+.ai/
+data/
+__pycache__/
+*.py[cod]
+.env
+config.yaml
+*.log

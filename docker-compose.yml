@@ -1,0 +1,10 @@
+services:
+  ig-tg-bridge:
+    build: .
+    container_name: ig-tg-bridge
+    restart: unless-stopped
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./data:/app/data
+    environment:
+      - TZ=Europe/Moscow

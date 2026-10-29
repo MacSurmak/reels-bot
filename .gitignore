@@ -1,46 +1,16 @@
-# Dependencies & Virtual Environments
-node_modules/
-.venv/
-venv/
-env/
-vendor/
+# Credentials, sessions, and secrets
+config.yaml
+.env
 
-# Byte-compiled / cache files
+# Python runtime artifacts
 __pycache__/
 *.py[cod]
-*$py.class
-.cache/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+.venv/
+venv/
 
-# Build & output artifacts
-dist/
-build/
-out/
-target/
-bin/
-obj/
-*.egg-info/
+# Persistent database, Instagram session, and temporary media workspace
+data/
 
-# IDEs & Editors
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Environment & secrets
-.env
-.env.local
-*.pem
-*.key
-
-# Logs & OS Files
+# Logs and assistant workdir
 *.log
-.DS_Store
-Thumbs.db
-
-# AI Workdir
 .ai/

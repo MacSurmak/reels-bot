@@ -1,0 +1,25 @@
+telegram:
+  bot_token: "1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ"
+  owner_id: 123456789
+
+instagram:
+  username: "your_instagram_username"
+  password: "your_instagram_password"
+  target_username: "girlfriend_instagram_username"
+
+device:
+  app_version: "269.0.0.18.75"
+  android_version: 31
+  android_release: "12.0"
+  dpi: "480dpi"
+  resolution: "1080x2400"
+  manufacturer: "Samsung"
+  device: "SM-G991B"
+  model: "o1s"
+  cpu: "exynos2100"
+  version_code: "314665256"
+
+polling:
+  interval_seconds: 8.0
+  jitter_seconds: 3.0
+  batch_fetch_limit: 20
