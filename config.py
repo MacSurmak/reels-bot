@@ -33,17 +33,6 @@ IG_REQUEST_DELAY_MAX_SECONDS = 3.0
 MIN_POLL_INTERVAL_SECONDS = 5.0
 MAX_BATCH_FETCH_LIMIT = 50
 
-HARDWARE_DEVICE_FIELDS = (
-    "android_version",
-    "android_release",
-    "dpi",
-    "resolution",
-    "manufacturer",
-    "device",
-    "model",
-    "cpu",
-)
-
 
 class ConfigurationError(Exception):
     """Raised when config.yaml is missing, malformed, or violates domain constraints."""
@@ -90,23 +79,7 @@ def load_and_validate_config() -> Dict[str, Any]:
                 f"Missing or empty required Instagram parameter: 'instagram.{field}'."
             )
 
-    # 3. Validate Android Device hardware profile section
-    device = config.get("device")
-    if not isinstance(device, dict):
-        raise ConfigurationError("Missing or invalid 'device' section in config.yaml.")
-
-    for field in HARDWARE_DEVICE_FIELDS:
-        if field not in device or device[field] is None or str(device[field]).strip() == "":
-            raise ConfigurationError(
-                f"Missing required Android hardware fingerprint field: 'device.{field}'."
-            )
-
-    if not isinstance(device["android_version"], int) or device["android_version"] <= 0:
-        raise ConfigurationError(
-            "Parameter 'device.android_version' must be a positive integer."
-        )
-
-    # 4. Validate Polling section
+    # 3. Validate Polling section
     polling = config.get("polling")
     if not isinstance(polling, dict):
         raise ConfigurationError("Missing or invalid 'polling' section in config.yaml.")

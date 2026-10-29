@@ -27,7 +27,6 @@ from config import (
     DATA_DIR,
     TMP_MEDIA_DIR,
     IG_SESSION_PATH,
-    HARDWARE_DEVICE_FIELDS,
     IG_REQUEST_DELAY_MIN_SECONDS,
     IG_REQUEST_DELAY_MAX_SECONDS,
     MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
@@ -53,18 +52,47 @@ class InstagramBridgeClient:
         self.username: str = ig_cfg["username"].strip()
         self.password: str = ig_cfg["password"].strip()
         self.target_username: str = ig_cfg["target_username"].strip().lstrip("@")
-        self.device_profile: dict = cfg["device"]
         self.batch_fetch_limit: int = int(cfg["polling"]["batch_fetch_limit"])
 
         self._lock = threading.Lock()
-        self._client = Client()
-        self._client.delay_range = [
-            IG_REQUEST_DELAY_MIN_SECONDS,
-            IG_REQUEST_DELAY_MAX_SECONDS,
-        ]
+        self._client = self._create_configured_client()
         self._target_user_id: Optional[str] = None
         self._is_authenticated: bool = False
         self._client_context_cache: OrderedDict[str, str] = OrderedDict()
+
+    def _create_configured_client(self) -> Client:
+        """Creates an instagrapi Client with native 2026 profile and interactive challenge handler."""
+        cl = Client()
+        cl.delay_range = [
+            IG_REQUEST_DELAY_MIN_SECONDS,
+            IG_REQUEST_DELAY_MAX_SECONDS,
+        ]
+        cl.challenge_code_handler = self._handle_challenge_code
+        return cl
+
+    def _handle_challenge_code(self, username: str, choice: Any = None) -> str:
+        """
+        Interactive callback invoked by instagrapi during CAA Bloks two-step verification
+        (`com.bloks.www.ap.two_step_verification.entrypoint_async`) or challenge checkpoints.
+        """
+        if not sys.stdin.isatty():
+            raise InstagramBridgeError(
+                f"Instagram requested a verification code (choice={choice}) for @{username}, "
+                "but no interactive TTY is attached. Run "
+                "'docker compose run --rm ig-tg-bridge python3 -m services.ig_client' first."
+            )
+        logger.info(
+            f"Instagram requested verification code for @{username} (method: {choice}). "
+            "Check your email, SMS, WhatsApp, or Instagram app notifications."
+        )
+        code = input(
+            f"👉 Enter verification code for @{username} (method={choice}): "
+        ).strip()
+        if not code:
+            raise InstagramBridgeError(
+                "Verification code cannot be empty. Authentication aborted."
+            )
+        return code
 
     def _cache_client_context(
         self, item_id: str, client_context: Optional[str]
@@ -77,30 +105,17 @@ class InstagramBridgeClient:
         while len(self._client_context_cache) > CLIENT_CONTEXT_CACHE_SIZE:
             self._client_context_cache.popitem(last=False)
 
-    def _apply_hardware_profile_locked(self) -> None:
-        """Applies hardware fingerprint while preserving instagrapi's CAA Bloks app version triple."""
-        hardware_only = {
-            k: self.device_profile[k]
-            for k in HARDWARE_DEVICE_FIELDS
-            if k in self.device_profile
-        }
-        self._client.set_device(hardware_only)
-        if hasattr(self._client, "set_app"):
-            self._client.set_app()
-        if hasattr(self._client, "set_user_agent"):
-            self._client.set_user_agent()
-
     def authenticate(self) -> None:
         """Authenticates with Instagram using persisted session settings or fresh login."""
         with self._lock:
             os.makedirs(DATA_DIR, exist_ok=True)
-            self._apply_hardware_profile_locked()
 
             if os.path.exists(IG_SESSION_PATH):
                 logger.info(
                     f"Loading persisted Instagram session from '{IG_SESSION_PATH}'..."
                 )
                 try:
+                    self._client = self._create_configured_client()
                     self._client.load_settings(
                         IG_SESSION_PATH, override_app_version=True
                     )
@@ -125,14 +140,9 @@ class InstagramBridgeClient:
             self._resolve_target_user_id_locked()
 
     def _perform_fresh_login(self) -> None:
-        """Executes fresh credential login (with interactive 2FA support) and saves session to disk."""
+        """Executes fresh credential login (with interactive challenge/2FA support) and saves session to disk."""
         try:
-            self._client = Client()
-            self._client.delay_range = [
-                IG_REQUEST_DELAY_MIN_SECONDS,
-                IG_REQUEST_DELAY_MAX_SECONDS,
-            ]
-            self._apply_hardware_profile_locked()
+            self._client = self._create_configured_client()
             try:
                 self._client.login(self.username, self.password)
             except TwoFactorRequired as tfa_err:
