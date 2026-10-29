@@ -1,0 +1,46 @@
+# Dependencies & Virtual Environments
+node_modules/
+.venv/
+venv/
+env/
+vendor/
+
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build & output artifacts
+dist/
+build/
+out/
+target/
+bin/
+obj/
+*.egg-info/
+
+# IDEs & Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Logs & OS Files
+*.log
+.DS_Store
+Thumbs.db
+
+# AI Workdir
+.ai/
