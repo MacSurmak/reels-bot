@@ -6,6 +6,8 @@ instagram:
   username: "your_instagram_username"
   password: "your_instagram_password"
   target_username: "girlfriend_instagram_username"
+  # Optional: numeric Instagram user ID to completely bypass remote username lookup
+  # target_user_id: 6462433344
   # Optional: browser 'sessionid' cookie to bypass cold CAA login challenges
   session_id: ""
 

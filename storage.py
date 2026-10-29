@@ -11,6 +11,7 @@
 # ==============================================================================
 
 import os
+import sqlite3
 import time
 from typing import Optional, Tuple, Dict, Any
 import aiosqlite
@@ -24,6 +25,7 @@ VALID_DIRECTIONS = ("ig_to_tg", "tg_to_ig")
 STATE_KEY_LAST_ITEM_ID = "last_seen_item_id"
 STATE_KEY_THREAD_ID = "target_thread_id"
 STATE_KEY_LAST_SYNC_TS = "last_sync_timestamp"
+STATE_KEY_TARGET_USER_ID_PREFIX = "target_uid:"
 
 
 def get_db() -> aiosqlite.Connection:
@@ -206,6 +208,69 @@ async def get_sync_state(key: str) -> Optional[str]:
         if not row:
             return None
         return str(row["state_value"])
+
+
+def get_sync_state_sync(key: str) -> Optional[str]:
+    """Synchronously retrieves a persistent synchronization state value by key from SQLite."""
+    if not key or not key.strip():
+        raise ValueError("Sync state key cannot be empty.")
+    if not os.path.exists(DB_PATH):
+        return None
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_state (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        cursor.execute(
+            "SELECT state_value FROM sync_state WHERE state_key = ?;",
+            (key.strip(),),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return str(row[0])
+
+
+def set_sync_state_sync(key: str, value: str) -> None:
+    """Synchronously and atomically updates a persistent synchronization state key in SQLite."""
+    if not key or not key.strip():
+        raise ValueError("Sync state key cannot be empty.")
+    if value is None or not str(value).strip():
+        raise ValueError(f"Sync state value for key '{key}' cannot be empty.")
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    now_ts = int(time.time())
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sync_state (
+                state_key TEXT PRIMARY KEY,
+                state_value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            """
+        )
+        cursor.execute(
+            """
+            INSERT INTO sync_state (state_key, state_value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                state_value = excluded.state_value,
+                updated_at = excluded.updated_at;
+            """,
+            (key.strip(), str(value).strip(), now_ts),
+        )
+        conn.commit()
 
 
 async def get_bridge_stats() -> Dict[str, Any]:

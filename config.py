@@ -96,6 +96,19 @@ def load_and_validate_config() -> Dict[str, Any]:
                 "Parameter 'instagram.session_id' must be a string if provided."
             )
 
+    if "target_user_id" in instagram and instagram["target_user_id"] is not None:
+        raw_uid = instagram["target_user_id"]
+        if isinstance(raw_uid, str) and not raw_uid.strip():
+            pass
+        elif isinstance(raw_uid, bool) or not (
+            isinstance(raw_uid, (int, str))
+            and str(raw_uid).strip().isdigit()
+            and int(raw_uid) > 0
+        ):
+            raise ConfigurationError(
+                "Parameter 'instagram.target_user_id' must be a positive integer or numeric string if provided."
+            )
+
     # 3. Validate Polling section
     polling = config.get("polling")
     if not isinstance(polling, dict):

@@ -41,6 +41,11 @@ from config import (
 )
 from models import IgDirectItem, IgItemType, PreparedTelegramVideo
 from services.logger import setup_logger
+from storage import (
+    STATE_KEY_TARGET_USER_ID_PREFIX,
+    get_sync_state_sync,
+    set_sync_state_sync,
+)
 
 CLIENT_CONTEXT_CACHE_SIZE = 500
 REEL_CODE_REGEX = re.compile(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)")
@@ -62,6 +67,12 @@ class InstagramBridgeClient:
         raw_sid = ig_cfg.get("session_id")
         self.session_id: Optional[str] = (
             raw_sid.strip() if isinstance(raw_sid, str) and raw_sid.strip() else None
+        )
+        raw_target_uid = ig_cfg.get("target_user_id")
+        self.configured_target_user_id: Optional[str] = (
+            str(raw_target_uid).strip()
+            if raw_target_uid is not None and str(raw_target_uid).strip()
+            else None
         )
         self.batch_fetch_limit: int = int(cfg["polling"]["batch_fetch_limit"])
 
@@ -268,24 +279,61 @@ class InstagramBridgeClient:
             ) from err
 
     def _resolve_target_user_id_locked(self) -> str:
-        """Resolves and caches numerical Instagram PK for target_username."""
+        """
+        Resolves, caches, and persists numerical Instagram PK for target_username.
+        Precedence:
+        1. In-memory cached self._target_user_id.
+        2. Configured 'instagram.target_user_id' in config.yaml.
+        3. Persisted target user ID in SQLite sync_state table.
+        4. Canonical mobile RPC user_info_by_username_v1 (persisted to SQLite atomically).
+        """
         if self._target_user_id:
             return self._target_user_id
-        try:
-            user_pk = self._client.user_id_from_username(self.target_username)
-            if not user_pk:
-                raise InstagramBridgeError(
-                    f"Could not resolve user ID for target @{self.target_username}."
-                )
-            self._target_user_id = str(user_pk)
+
+        db_key = f"{STATE_KEY_TARGET_USER_ID_PREFIX}{self.target_username}"
+
+        if self.configured_target_user_id:
+            self._target_user_id = self.configured_target_user_id
+            set_sync_state_sync(db_key, self._target_user_id)
             logger.info(
-                f"Resolved target @{self.target_username} -> user_id={self._target_user_id}"
+                f"Target @{self.target_username} user_id={self._target_user_id} loaded from config (network lookup bypassed)."
             )
             return self._target_user_id
+
+        cached_uid = get_sync_state_sync(db_key)
+        if cached_uid:
+            self._target_user_id = cached_uid
+            logger.info(
+                f"Loaded target @{self.target_username} -> user_id={self._target_user_id} from SQLite sync_state (network lookup bypassed)."
+            )
+            return self._target_user_id
+
+        logger.info(
+            f"Resolving numerical user_id for target @{self.target_username} via mobile endpoint..."
+        )
+        try:
+            user_info = self._client.user_info_by_username_v1(self.target_username)
         except Exception as err:
             raise InstagramBridgeError(
                 f"Failed to lookup target Instagram user @{self.target_username}: {err}"
             ) from err
+
+        user_pk = getattr(user_info, "pk", None)
+        if user_pk is None and isinstance(user_info, dict):
+            user_pk = user_info.get("pk") or user_info.get("id")
+
+        if not user_pk or not str(user_pk).strip():
+            raise InstagramBridgeError(
+                f"Could not resolve user ID for target @{self.target_username}: "
+                f"user_info_by_username_v1 returned empty or invalid pk ({user_pk})."
+            )
+
+        self._target_user_id = str(user_pk).strip()
+        set_sync_state_sync(db_key, self._target_user_id)
+        logger.info(
+            f"Resolved target @{self.target_username} -> user_id={self._target_user_id} via mobile RPC and persisted to SQLite."
+        )
+        return self._target_user_id
 
     def check_health(self) -> Tuple[bool, str]:
         """Returns current authentication status and target user resolution details."""
