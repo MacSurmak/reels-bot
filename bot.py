@@ -11,6 +11,7 @@
 # ==============================================================================
 
 import os
+import time
 import asyncio
 from contextlib import suppress
 from aiogram import Bot, Dispatcher
@@ -22,6 +23,7 @@ from config import (
     TMP_MEDIA_DIR,
     GC_INTERVAL_SECONDS,
     MAPPING_RETENTION_TTL_SECONDS,
+    ORPHAN_MEDIA_TTL_SECONDS,
 )
 from storage import init_db, close_db, cleanup_expired_mappings
 from middlewares import OwnerAuthMiddleware
@@ -49,14 +51,32 @@ def sanitize_temp_workspace() -> None:
 
 
 async def run_garbage_collector() -> None:
-    """Periodically purges expired message mappings from SQLite."""
+    """Periodically purges expired message mappings from SQLite and orphaned files from TMP_MEDIA_DIR."""
     while True:
         try:
             await asyncio.sleep(GC_INTERVAL_SECONDS)
             purged_count = await cleanup_expired_mappings(MAPPING_RETENTION_TTL_SECONDS)
-            if purged_count > 0:
+
+            cleaned_files = 0
+            if os.path.exists(TMP_MEDIA_DIR):
+                now = time.time()
+                for fname in os.listdir(TMP_MEDIA_DIR):
+                    fpath = os.path.join(TMP_MEDIA_DIR, fname)
+                    try:
+                        if (
+                            os.path.isfile(fpath)
+                            and now - os.path.getmtime(fpath) > ORPHAN_MEDIA_TTL_SECONDS
+                        ):
+                            os.remove(fpath)
+                            cleaned_files += 1
+                    except OSError as err:
+                        logger.warning(
+                            f"[GC] Failed to remove orphaned file '{fpath}': {err}"
+                        )
+
+            if purged_count > 0 or cleaned_files > 0:
                 logger.info(
-                    f"[GC] Purged {purged_count} expired message mapping(s) from SQLite."
+                    f"[GC] Purged {purged_count} expired mapping(s) and {cleaned_files} orphaned temp file(s)."
                 )
         except asyncio.CancelledError:
             break

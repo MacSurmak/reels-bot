@@ -42,6 +42,9 @@ def setup_logger(
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("instagrapi").setLevel(logging.WARNING)
+    logging.getLogger("private_request").setLevel(logging.WARNING)
+    logging.getLogger("public_request").setLevel(logging.WARNING)
 
     if ignored:
         for module_name in ignored:
