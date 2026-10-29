@@ -41,7 +41,10 @@ from models import IgDirectItem, IgItemType, PreparedTelegramVideo
 from services.logger import setup_logger
 
 CLIENT_CONTEXT_CACHE_SIZE = 500
-REEL_CODE_REGEX = re.compile(r"instagram\.com/(?:reel|reels|p)/([A-Za-z0-9_-]+)")
+REEL_CODE_REGEX = re.compile(
+    r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)"
+)
+MEDIA_ID_QUERY_REGEX = re.compile(r"[?&]id=(\d+)")
 
 
 class InstagramBridgeError(Exception):
@@ -414,25 +417,79 @@ class InstagramBridgeClient:
 
             return thread_id, newest_item_id, normalized_items
 
+    @staticmethod
+    def _is_instagram_webpage_url(url: Optional[str]) -> bool:
+        """Returns True if the URL points to an Instagram web page rather than a CDN media stream."""
+        if not url:
+            return False
+        lowered = url.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "instagram.com/reel/",
+                "instagram.com/reels/",
+                "instagram.com/p/",
+                "instagram.com/tv/",
+                "instagram.com/share/",
+            )
+        )
+
+    @staticmethod
+    def _canonicalize_public_url(raw_url: str, default_kind: str = "reel") -> str:
+        """Extracts clean canonical Instagram URL without tracking query parameters."""
+        match = REEL_CODE_REGEX.search(raw_url)
+        if match:
+            code = match.group(1)
+            prefix = "p" if "/p/" in raw_url.lower() else default_kind
+            return f"https://www.instagram.com/{prefix}/{code}/"
+        return raw_url
+
     def _resolve_video_url_from_public_link_locked(
         self, public_url: Optional[str]
     ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """Fallback resolver that fetches (video_url, caption, author) via media_pk when XMA omits video_url."""
+        """Resolves direct CDN (video_url, caption, author) via authenticated mobile media_info_v1."""
         if not public_url:
             return None, None, None
-        match = REEL_CODE_REGEX.search(public_url)
-        if not match:
+
+        media_pk: Optional[int] = None
+        id_match = MEDIA_ID_QUERY_REGEX.search(public_url)
+        if id_match:
+            media_pk = int(id_match.group(1))
+        else:
+            code_match = REEL_CODE_REGEX.search(public_url)
+            if code_match:
+                try:
+                    media_pk = int(
+                        self._client.media_pk_from_code(code_match.group(1))
+                    )
+                except Exception:
+                    media_pk = int(self._client.media_pk_from_url(public_url))
+
+        if not media_pk:
             return None, None, None
+
         try:
-            media_pk = self._client.media_pk_from_url(public_url)
-            info = self._client.media_info(media_pk)
-            video_url = str(info.video_url) if getattr(info, "video_url", None) else None
+            info = self._client.media_info_v1(media_pk)
+            video_url = (
+                str(info.video_url) if getattr(info, "video_url", None) else None
+            )
+            if not video_url and getattr(info, "resources", None):
+                for res in info.resources:
+                    if getattr(res, "video_url", None):
+                        video_url = str(res.video_url)
+                        break
+
             caption = getattr(info, "caption_text", None)
             author = getattr(getattr(info, "user", None), "username", None)
+            logger.info(
+                f"Resolved Reel media_pk={media_pk} via media_info_v1 "
+                f"(author=@{author}, has_video={bool(video_url)})"
+            )
             return video_url, caption, author
         except Exception as err:
             logger.warning(
-                f"Could not resolve direct video stream via media_info for '{public_url}': {err}"
+                f"Could not resolve direct video stream via media_info_v1 for '{public_url}' "
+                f"(media_pk={media_pk}): {err}"
             )
             return None, None, None
 
@@ -474,10 +531,15 @@ class InstagramBridgeClient:
             xma_obj = getattr(msg, "xma_share", None)
 
             code = getattr(clip_obj, "code", None) if clip_obj else None
-            video_url = (
+            raw_clip_video = (
                 str(clip_obj.video_url)
                 if clip_obj and getattr(clip_obj, "video_url", None)
                 else None
+            )
+            video_url = (
+                None
+                if self._is_instagram_webpage_url(raw_clip_video)
+                else raw_clip_video
             )
             caption = getattr(clip_obj, "caption_text", None) if clip_obj else None
             author = (
@@ -485,32 +547,53 @@ class InstagramBridgeClient:
                 if clip_obj
                 else None
             )
-            public_url = f"https://www.instagram.com/reel/{code}/" if code else None
+            raw_public_url = (
+                f"https://www.instagram.com/reel/{code}/" if code else None
+            )
+            if not raw_public_url and self._is_instagram_webpage_url(raw_clip_video):
+                raw_public_url = raw_clip_video
 
             if xma_obj is not None:
-                if not public_url and getattr(xma_obj, "target_url", None):
-                    public_url = str(xma_obj.target_url)
-                if not video_url and getattr(xma_obj, "video_url", None):
-                    video_url = str(xma_obj.video_url)
+                # Note: instagrapi's extract_direct_xma maps Instagram's `target_url`
+                # (the Reel webpage link) into `xma_share.video_url`.
+                xma_target = (
+                    str(xma_obj.target_url)
+                    if getattr(xma_obj, "target_url", None)
+                    else None
+                )
+                xma_video = (
+                    str(xma_obj.video_url)
+                    if getattr(xma_obj, "video_url", None)
+                    else None
+                )
+
+                for candidate in (xma_target, xma_video):
+                    if not candidate:
+                        continue
+                    if self._is_instagram_webpage_url(candidate):
+                        if not raw_public_url:
+                            raw_public_url = candidate
+                    elif not video_url:
+                        video_url = candidate
+
                 if not caption and getattr(xma_obj, "title", None):
                     caption = str(xma_obj.title)
+                if not author and getattr(xma_obj, "header_title_text", None):
+                    author = str(xma_obj.header_title_text)
 
-            if not public_url and isinstance(getattr(msg, "raw_xma", None), list):
-                raw_xma_list = getattr(msg, "raw_xma")
-                if raw_xma_list and isinstance(raw_xma_list[0], dict):
-                    target_u = raw_xma_list[0].get("target_url") or raw_xma_list[0].get(
-                        " playable_url"
-                    )
-                    if target_u:
-                        public_url = str(target_u)
-
-            if public_url and not video_url:
+            if raw_public_url and not video_url:
                 resolved_v, resolved_c, resolved_a = (
-                    self._resolve_video_url_from_public_link_locked(public_url)
+                    self._resolve_video_url_from_public_link_locked(raw_public_url)
                 )
                 video_url = video_url or resolved_v
                 caption = caption or resolved_c
                 author = author or resolved_a
+
+            clean_public_url = (
+                self._canonicalize_public_url(raw_public_url, default_kind="reel")
+                if raw_public_url
+                else "https://www.instagram.com/"
+            )
 
             return IgDirectItem(
                 item_id=item_id,
@@ -519,7 +602,7 @@ class InstagramBridgeClient:
                 item_type=IgItemType.REEL,
                 raw_item_type=raw_type,
                 text=msg_text or caption,
-                public_url=public_url or "https://www.instagram.com/",
+                public_url=clean_public_url,
                 media_download_url=video_url,
                 author_username=author,
                 replied_to_item_id=replied_to_id,
@@ -533,16 +616,22 @@ class InstagramBridgeClient:
                 or getattr(msg, "xma_share", None)
             )
             code = getattr(share_obj, "code", None) if share_obj else None
-            public_url = f"https://www.instagram.com/p/{code}/" if code else None
-            if not public_url and share_obj and getattr(share_obj, "target_url", None):
-                public_url = str(share_obj.target_url)
+            raw_public_url = (
+                f"https://www.instagram.com/p/{code}/" if code else None
+            )
 
             media_url = None
             if share_obj:
-                if getattr(share_obj, "video_url", None):
-                    media_url = str(share_obj.video_url)
-                elif getattr(share_obj, "thumbnail_url", None):
-                    media_url = str(share_obj.thumbnail_url)
+                for attr in ("target_url", "video_url", "thumbnail_url", "preview_url"):
+                    val = getattr(share_obj, attr, None)
+                    if not val:
+                        continue
+                    s_val = str(val)
+                    if self._is_instagram_webpage_url(s_val):
+                        if not raw_public_url:
+                            raw_public_url = s_val
+                    elif not media_url:
+                        media_url = s_val
 
             author = (
                 getattr(getattr(share_obj, "user", None), "username", None)
@@ -551,6 +640,20 @@ class InstagramBridgeClient:
             )
             caption = getattr(share_obj, "caption_text", None) if share_obj else None
 
+            if raw_public_url and not media_url:
+                resolved_v, resolved_c, resolved_a = (
+                    self._resolve_video_url_from_public_link_locked(raw_public_url)
+                )
+                media_url = media_url or resolved_v
+                caption = caption or resolved_c
+                author = author or resolved_a
+
+            clean_public_url = (
+                self._canonicalize_public_url(raw_public_url, default_kind="p")
+                if raw_public_url
+                else "https://www.instagram.com/"
+            )
+
             return IgDirectItem(
                 item_id=item_id,
                 thread_id=thread_id,
@@ -558,7 +661,7 @@ class InstagramBridgeClient:
                 item_type=IgItemType.POST,
                 raw_item_type=raw_type,
                 text=msg_text or caption,
-                public_url=public_url or "https://www.instagram.com/",
+                public_url=clean_public_url,
                 media_download_url=media_url,
                 author_username=author,
                 replied_to_item_id=replied_to_id,
@@ -748,6 +851,11 @@ class InstagramBridgeClient:
                 timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
             ) as resp:
                 resp.raise_for_status()
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if "text/html" in content_type:
+                    raise InstagramBridgeError(
+                        f"URL returned an HTML page instead of a media stream (Content-Type='{content_type}')."
+                    )
                 with open(target_path, "wb") as out_file:
                     for chunk in resp.iter_content(
                         chunk_size=MEDIA_DOWNLOAD_CHUNK_SIZE
