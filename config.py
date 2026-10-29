@@ -79,6 +79,12 @@ def load_and_validate_config() -> Dict[str, Any]:
                 f"Missing or empty required Instagram parameter: 'instagram.{field}'."
             )
 
+    if "session_id" in instagram and instagram["session_id"] is not None:
+        if not isinstance(instagram["session_id"], str):
+            raise ConfigurationError(
+                "Parameter 'instagram.session_id' must be a string if provided."
+            )
+
     # 3. Validate Polling section
     polling = config.get("polling")
     if not isinstance(polling, dict):

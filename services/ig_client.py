@@ -52,6 +52,10 @@ class InstagramBridgeClient:
         self.username: str = ig_cfg["username"].strip()
         self.password: str = ig_cfg["password"].strip()
         self.target_username: str = ig_cfg["target_username"].strip().lstrip("@")
+        raw_sid = ig_cfg.get("session_id")
+        self.session_id: Optional[str] = (
+            raw_sid.strip() if isinstance(raw_sid, str) and raw_sid.strip() else None
+        )
         self.batch_fetch_limit: int = int(cfg["polling"]["batch_fetch_limit"])
 
         self._lock = threading.Lock()
@@ -59,6 +63,14 @@ class InstagramBridgeClient:
         self._target_user_id: Optional[str] = None
         self._is_authenticated: bool = False
         self._client_context_cache: OrderedDict[str, str] = OrderedDict()
+
+    @staticmethod
+    def _normalize_session_id(raw_session_id: str) -> str:
+        """Normalizes browser sessionid cookie (ensures %3A separator required by instagrapi)."""
+        cleaned = raw_session_id.strip().strip('"').strip("'")
+        if "%3A" not in cleaned and "%3a" not in cleaned and ":" in cleaned:
+            cleaned = cleaned.replace(":", "%3A")
+        return cleaned
 
     def _create_configured_client(self) -> Client:
         """Creates an instagrapi Client with native 2026 profile and interactive challenge handler."""
@@ -106,7 +118,7 @@ class InstagramBridgeClient:
             self._client_context_cache.popitem(last=False)
 
     def authenticate(self) -> None:
-        """Authenticates with Instagram using persisted session settings or fresh login."""
+        """Authenticates with Instagram using persisted session settings, sessionid, or CAA login."""
         with self._lock:
             os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -119,7 +131,6 @@ class InstagramBridgeClient:
                     self._client.load_settings(
                         IG_SESSION_PATH, override_app_version=True
                     )
-                    self._client.login(self.username, self.password)
                     self._client.get_timeline_feed()
                     self._client.dump_settings(IG_SESSION_PATH)
                     self._is_authenticated = True
@@ -139,40 +150,107 @@ class InstagramBridgeClient:
 
             self._resolve_target_user_id_locked()
 
+    def _login_with_session_id_locked(self, raw_sid: str) -> None:
+        """Authenticates mobile client directly from a browser sessionid cookie."""
+        clean_sid = self._normalize_session_id(raw_sid)
+        logger.info(f"Authenticating @{self.username} via sessionid cookie...")
+        self._client = self._create_configured_client()
+        self._client.login_by_sessionid(clean_sid)
+        self._client.dump_settings(IG_SESSION_PATH)
+        self._is_authenticated = True
+        logger.info(
+            f"Sessionid authentication succeeded for @{self.username}. "
+            f"Mobile session saved to '{IG_SESSION_PATH}'."
+        )
+
     def _perform_fresh_login(self) -> None:
-        """Executes fresh credential login (with interactive challenge/2FA support) and saves session to disk."""
+        """Executes fresh authentication via configured session_id, CAA Bloks, or interactive sessionid prompt."""
         try:
+            if self.session_id:
+                self._login_with_session_id_locked(self.session_id)
+                return
+
             self._client = self._create_configured_client()
+            self._client.username = self.username
+            self._client.password = self.password
+
             try:
-                self._client.login(self.username, self.password)
-            except TwoFactorRequired as tfa_err:
+                outcome = self._client.bloks_caa_login()
+            except TwoFactorRequired:
                 if not sys.stdin.isatty():
                     raise InstagramBridgeError(
-                        f"Two-factor authentication is required for @{self.username}. "
-                        "Run 'docker compose run --rm ig-tg-bridge python3 -m services.ig_client' "
-                        "in an interactive terminal first to enter the 2FA code."
-                    ) from tfa_err
-                logger.info(
-                    f"2FA challenge requested for @{self.username}. Waiting for code input..."
-                )
-                verification_code = input(
-                    f"Enter 2FA verification code for @{self.username}: "
+                        f"2FA is required for @{self.username}. Configure 'instagram.session_id' "
+                        "in config.yaml or run interactive bootstrap."
+                    )
+                code = input(
+                    f"👉 Enter 6-digit 2FA code for @{self.username}: "
                 ).strip()
-                if not verification_code:
-                    raise InstagramBridgeError(
-                        "Empty 2FA verification code provided."
-                    ) from tfa_err
-                self._client.login(
-                    self.username,
-                    self.password,
-                    verification_code=verification_code,
+                outcome = self._client.bloks_caa_login(verification_code=code)
+
+            if isinstance(outcome, dict) and outcome.get("logged_in"):
+                self._client.dump_settings(IG_SESSION_PATH)
+                self._is_authenticated = True
+                logger.info(
+                    f"CAA Bloks login succeeded for @{self.username}. "
+                    f"Session saved to '{IG_SESSION_PATH}'."
+                )
+                return
+
+            reason = (
+                outcome.get("reason", "unknown")
+                if isinstance(outcome, dict)
+                else "unknown"
+            )
+            logger.warning(
+                f"Cold CAA Bloks login did not return a session (reason='{reason}'). "
+                "Bypassing dead legacy login endpoint."
+            )
+
+            if not sys.stdin.isatty():
+                raise InstagramBridgeError(
+                    f"Cold CAA login blocked by Instagram two-step verification (reason='{reason}'). "
+                    "Set 'instagram.session_id' in config.yaml or run interactive bootstrap: "
+                    "'docker compose run --rm ig-tg-bridge python3 -m services.ig_client'"
                 )
 
-            self._client.dump_settings(IG_SESSION_PATH)
-            self._is_authenticated = True
-            logger.info(
-                f"Fresh login succeeded for @{self.username}. Session saved to '{IG_SESSION_PATH}'."
+            print(
+                "\n======================================================================\n"
+                "Instagram blocked cold password login with a Bloks verification screen.\n"
+                "To initialize the mobile session immediately:\n"
+                "1. Open https://www.instagram.com in your browser (logged into your account)\n"
+                "2. Press F12 -> Application (or Storage) -> Cookies -> https://www.instagram.com\n"
+                "3. Copy the value of the 'sessionid' cookie and paste it below\n"
+                "   (OR enter your 6-digit TOTP authenticator code if using an authenticator app)\n"
+                "======================================================================"
             )
+            user_input = input(
+                f"👉 Paste 'sessionid' cookie (or 6-digit 2FA code) for @{self.username}: "
+            ).strip()
+
+            if not user_input:
+                raise InstagramBridgeError(
+                    "Empty input provided. Authentication aborted."
+                )
+
+            if user_input.isdigit() and len(user_input) in (6, 8):
+                retry_outcome = self._client.bloks_caa_login(
+                    verification_code=user_input
+                )
+                if isinstance(retry_outcome, dict) and retry_outcome.get("logged_in"):
+                    self._client.dump_settings(IG_SESSION_PATH)
+                    self._is_authenticated = True
+                    logger.info(
+                        f"CAA 2FA login succeeded for @{self.username}. "
+                        f"Session saved to '{IG_SESSION_PATH}'."
+                    )
+                    return
+                raise InstagramBridgeError(
+                    f"CAA login with 2FA code failed (reason='{retry_outcome.get('reason')}'). "
+                    "Please use browser 'sessionid' instead."
+                )
+
+            self._login_with_session_id_locked(user_input)
+
         except InstagramBridgeError:
             self._is_authenticated = False
             raise
