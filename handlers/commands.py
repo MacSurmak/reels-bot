@@ -3,7 +3,7 @@ from aiogram import Router, types
 from aiogram.filters import CommandStart, Command
 
 from lexicon import t
-from services import ig_bridge
+from services.ig_client import ig_bridge
 from storage import get_bridge_stats
 
 router = Router(name="commands_router")

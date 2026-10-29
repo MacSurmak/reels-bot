@@ -12,12 +12,14 @@
 
 import os
 import re
+import sys
 import threading
 from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Optional, List, Tuple, Any
 import requests
 from instagrapi import Client
+from instagrapi.exceptions import TwoFactorRequired
 from loguru import logger
 
 from config import (
@@ -25,6 +27,7 @@ from config import (
     DATA_DIR,
     TMP_MEDIA_DIR,
     IG_SESSION_PATH,
+    HARDWARE_DEVICE_FIELDS,
     IG_REQUEST_DELAY_MIN_SECONDS,
     IG_REQUEST_DELAY_MAX_SECONDS,
     MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
@@ -74,18 +77,33 @@ class InstagramBridgeClient:
         while len(self._client_context_cache) > CLIENT_CONTEXT_CACHE_SIZE:
             self._client_context_cache.popitem(last=False)
 
+    def _apply_hardware_profile_locked(self) -> None:
+        """Applies hardware fingerprint while preserving instagrapi's CAA Bloks app version triple."""
+        hardware_only = {
+            k: self.device_profile[k]
+            for k in HARDWARE_DEVICE_FIELDS
+            if k in self.device_profile
+        }
+        self._client.set_device(hardware_only)
+        if hasattr(self._client, "set_app"):
+            self._client.set_app()
+        if hasattr(self._client, "set_user_agent"):
+            self._client.set_user_agent()
+
     def authenticate(self) -> None:
         """Authenticates with Instagram using persisted session settings or fresh login."""
         with self._lock:
             os.makedirs(DATA_DIR, exist_ok=True)
-            self._client.set_device(self.device_profile)
+            self._apply_hardware_profile_locked()
 
             if os.path.exists(IG_SESSION_PATH):
                 logger.info(
                     f"Loading persisted Instagram session from '{IG_SESSION_PATH}'..."
                 )
                 try:
-                    self._client.load_settings(IG_SESSION_PATH)
+                    self._client.load_settings(
+                        IG_SESSION_PATH, override_app_version=True
+                    )
                     self._client.login(self.username, self.password)
                     self._client.get_timeline_feed()
                     self._client.dump_settings(IG_SESSION_PATH)
@@ -107,20 +125,47 @@ class InstagramBridgeClient:
             self._resolve_target_user_id_locked()
 
     def _perform_fresh_login(self) -> None:
-        """Executes fresh credential login and persists session settings to disk."""
+        """Executes fresh credential login (with interactive 2FA support) and saves session to disk."""
         try:
             self._client = Client()
             self._client.delay_range = [
                 IG_REQUEST_DELAY_MIN_SECONDS,
                 IG_REQUEST_DELAY_MAX_SECONDS,
             ]
-            self._client.set_device(self.device_profile)
-            self._client.login(self.username, self.password)
+            self._apply_hardware_profile_locked()
+            try:
+                self._client.login(self.username, self.password)
+            except TwoFactorRequired as tfa_err:
+                if not sys.stdin.isatty():
+                    raise InstagramBridgeError(
+                        f"Two-factor authentication is required for @{self.username}. "
+                        "Run 'docker compose run --rm ig-tg-bridge python3 -m services.ig_client' "
+                        "in an interactive terminal first to enter the 2FA code."
+                    ) from tfa_err
+                logger.info(
+                    f"2FA challenge requested for @{self.username}. Waiting for code input..."
+                )
+                verification_code = input(
+                    f"Enter 2FA verification code for @{self.username}: "
+                ).strip()
+                if not verification_code:
+                    raise InstagramBridgeError(
+                        "Empty 2FA verification code provided."
+                    ) from tfa_err
+                self._client.login(
+                    self.username,
+                    self.password,
+                    verification_code=verification_code,
+                )
+
             self._client.dump_settings(IG_SESSION_PATH)
             self._is_authenticated = True
             logger.info(
                 f"Fresh login succeeded for @{self.username}. Session saved to '{IG_SESSION_PATH}'."
             )
+        except InstagramBridgeError:
+            self._is_authenticated = False
+            raise
         except Exception as err:
             self._is_authenticated = False
             raise InstagramBridgeError(

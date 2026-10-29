@@ -4,7 +4,7 @@ from loguru import logger
 
 from lexicon import t
 from models import IgItemType
-from services import ig_bridge
+from services.ig_client import ig_bridge
 from storage import (
     STATE_KEY_THREAD_ID,
     get_ig_target_by_tg_id,

@@ -27,7 +27,9 @@ from storage import init_db, close_db, cleanup_expired_mappings
 from middlewares import OwnerAuthMiddleware
 from handlers import main_router
 from lexicon import set_bot_commands
-from services import setup_logger, ig_bridge, run_instagram_poller
+from services import setup_logger
+from services.ig_client import ig_bridge
+from services.poller import run_instagram_poller
 
 
 def sanitize_temp_workspace() -> None:
