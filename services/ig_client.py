@@ -288,6 +288,43 @@ class InstagramBridgeClient:
             return False, "Target user ID not resolved"
         return True, f"user_id={self._target_user_id}"
 
+    def _resolve_thread_id_locked(self, target_uid: str) -> str:
+        """Resolves Direct thread_id for target_uid from participant lookup or inbox scan."""
+        res = self._client.direct_thread_by_participants([int(target_uid)])
+        resolved_id: Optional[str] = None
+
+        if isinstance(res, dict):
+            thread_sub = res.get("thread")
+            if isinstance(thread_sub, dict):
+                raw_id = (
+                    thread_sub.get("thread_id")
+                    or thread_sub.get("id")
+                    or thread_sub.get("thread_v2_id")
+                )
+                if raw_id:
+                    resolved_id = str(raw_id)
+            else:
+                raw_id = res.get("thread_id") or res.get("id")
+                if raw_id:
+                    resolved_id = str(raw_id)
+        elif getattr(res, "id", None):
+            resolved_id = str(res.id)
+
+        if not resolved_id:
+            threads = self._client.direct_threads(amount=30)
+            for t_obj in threads:
+                users = getattr(t_obj, "users", []) or []
+                if any(str(getattr(u, "pk", "")) == target_uid for u in users):
+                    if getattr(t_obj, "id", None):
+                        resolved_id = str(t_obj.id)
+                        break
+
+        if not resolved_id:
+            raise InstagramBridgeError(
+                f"Direct thread with @{self.target_username} (user_id={target_uid}) was not found."
+            )
+        return resolved_id
+
     def fetch_new_items(
         self,
         last_seen_item_id: Optional[str],
@@ -306,20 +343,22 @@ class InstagramBridgeClient:
             target_uid = self._resolve_target_user_id_locked()
 
             try:
-                if known_thread_id:
-                    thread = self._client.direct_thread(
-                        int(known_thread_id), amount=self.batch_fetch_limit
-                    )
-                else:
-                    thread = self._client.direct_thread_by_participants(
-                        [int(target_uid)]
-                    )
+                active_thread_id = (
+                    str(known_thread_id).strip()
+                    if known_thread_id
+                    else self._resolve_thread_id_locked(target_uid)
+                )
+                thread = self._client.direct_thread(
+                    int(active_thread_id), amount=self.batch_fetch_limit
+                )
+            except InstagramBridgeError:
+                raise
             except Exception as err:
                 raise InstagramBridgeError(
                     f"Failed to fetch Direct thread for @{self.target_username}: {err}"
                 ) from err
 
-            if not thread or not thread.id:
+            if not thread or not getattr(thread, "id", None):
                 raise InstagramBridgeError(
                     f"Direct thread with @{self.target_username} was not found."
                 )
