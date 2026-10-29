@@ -23,6 +23,7 @@ import requests
 from PIL import Image
 from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
+from instagrapi.extractors import extract_direct_thread
 from loguru import logger
 
 from config import (
@@ -350,6 +351,7 @@ class InstagramBridgeClient:
 
             target_uid = self._resolve_target_user_id_locked()
 
+            raw_items_by_id: Dict[str, Dict[str, Any]] = {}
             try:
                 active_thread_id = (
                     str(known_thread_id).strip()
@@ -361,9 +363,25 @@ class InstagramBridgeClient:
                     if last_seen_item_id
                     else SINGLE_PAGE_THREAD_AMOUNT
                 )
-                thread = self._client.direct_thread(
-                    int(active_thread_id), amount=fetch_amount
+                raw_resp = self._client.private_request(
+                    f"direct_v2/threads/{active_thread_id}/",
+                    params={
+                        "direction": "older",
+                        "limit": str(fetch_amount),
+                    },
                 )
+                raw_thread = (
+                    raw_resp.get("thread") if isinstance(raw_resp, dict) else None
+                )
+                if isinstance(raw_thread, dict):
+                    for raw_it in raw_thread.get("items") or []:
+                        if isinstance(raw_it, dict) and raw_it.get("item_id"):
+                            raw_items_by_id[str(raw_it["item_id"])] = raw_it
+                    thread = extract_direct_thread(raw_thread)
+                else:
+                    thread = self._client.direct_thread(
+                        int(active_thread_id), amount=fetch_amount
+                    )
             except InstagramBridgeError:
                 raise
             except Exception as err:
@@ -412,8 +430,11 @@ class InstagramBridgeClient:
             # Process in chronological order (oldest first)
             normalized_items: List[IgDirectItem] = []
             for raw_msg in reversed(new_raw_messages):
+                raw_dict = raw_items_by_id.get(str(raw_msg.id))
                 normalized_items.append(
-                    self._normalize_item_locked(raw_msg, thread_id, target_uid)
+                    self._normalize_item_locked(
+                        raw_msg, thread_id, target_uid, raw_dict
+                    )
                 )
 
             return thread_id, newest_item_id, normalized_items
@@ -506,8 +527,95 @@ class InstagramBridgeClient:
             )
             return None, None, None, None
 
+    @classmethod
+    def _extract_urls_from_raw_media_dict(
+        cls, data: Any
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Recursively searches a raw Instagram JSON structure for video_versions and image_versions2."""
+        if not isinstance(data, dict):
+            return None, None
+
+        video_url: Optional[str] = None
+        photo_url: Optional[str] = None
+
+        vid_versions = data.get("video_versions")
+        if isinstance(vid_versions, list) and vid_versions:
+            valid_vids = [
+                v for v in vid_versions if isinstance(v, dict) and v.get("url")
+            ]
+            if valid_vids:
+                best_vid = max(
+                    valid_vids,
+                    key=lambda x: int(x.get("width") or 0) * int(x.get("height") or 0),
+                )
+                video_url = str(best_vid["url"])
+
+        img_versions2 = data.get("image_versions2")
+        if isinstance(img_versions2, dict):
+            candidates = img_versions2.get("candidates")
+            if isinstance(candidates, list) and candidates:
+                valid_imgs = [
+                    c for c in candidates if isinstance(c, dict) and c.get("url")
+                ]
+                if valid_imgs:
+                    best_img = max(
+                        valid_imgs,
+                        key=lambda x: int(x.get("width") or 0)
+                        * int(x.get("height") or 0),
+                    )
+                    photo_url = str(best_img["url"])
+
+        if video_url or photo_url:
+            return video_url, photo_url
+
+        for sub_key in ("visual_media", "raven_media", "media"):
+            sub_val = data.get(sub_key)
+            if isinstance(sub_val, dict):
+                v_url, p_url = cls._extract_urls_from_raw_media_dict(sub_val)
+                if v_url or p_url:
+                    return v_url, p_url
+
+        return None, None
+
+    def _resolve_raven_media_locked(
+        self,
+        thread_id: str,
+        item_id: str,
+        raw_item_dict: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolves (video_url, photo_url) for raven_media / visual_media via raw dict or get_items API."""
+        if raw_item_dict:
+            v_url, p_url = self._extract_urls_from_raw_media_dict(raw_item_dict)
+            if v_url or p_url:
+                return v_url, p_url
+
+        try:
+            resp = self._client.private_request(
+                f"direct_v2/threads/{thread_id}/get_items/",
+                params={
+                    "item_ids": f"[{item_id}]",
+                    "original_message_client_context": '[""]',
+                },
+            )
+            if isinstance(resp, dict):
+                items = resp.get("items") or []
+                for it in items:
+                    v_url, p_url = self._extract_urls_from_raw_media_dict(it)
+                    if v_url or p_url:
+                        return v_url, p_url
+        except Exception as err:
+            logger.warning(
+                f"Fallback get_items lookup failed for raven_media #{item_id}: {err}"
+            )
+
+        return None, None
+
     def _normalize_item_locked(
-        self, msg: Any, thread_id: str, sender_uid: str
+        self,
+        msg: Any,
+        thread_id: str,
+        sender_uid: str,
+        raw_item_dict: Optional[Dict[str, Any]] = None,
     ) -> IgDirectItem:
         """Converts raw instagrapi DirectMessage into a strongly-typed IgDirectItem DTO."""
         item_id = str(msg.id)
@@ -680,37 +788,61 @@ class InstagramBridgeClient:
                 replied_to_item_id=replied_to_id,
             )
 
-        # 4. Direct Photo or Video sent in chat
+        # 4. Direct Photo or Video sent in chat (including Keep-in-chat and Raven camera media)
         if raw_type in ("media", "raven_media", "visual_media"):
             media_obj = getattr(msg, "media", None)
             vis_obj = getattr(msg, "visual_media", None)
             if vis_obj and getattr(vis_obj, "media", None):
                 media_obj = vis_obj.media
 
+            video_url: Optional[str] = None
+            photo_url: Optional[str] = None
+
             if media_obj:
-                m_type = getattr(media_obj, "media_type", 1)
-                if m_type == 2 and getattr(media_obj, "video_url", None):
-                    return IgDirectItem(
-                        item_id=item_id,
-                        thread_id=thread_id,
-                        sender_user_id=sender_uid,
-                        item_type=IgItemType.VIDEO,
-                        raw_item_type=raw_type,
-                        text=msg_text,
-                        media_download_url=str(media_obj.video_url),
-                        replied_to_item_id=replied_to_id,
-                    )
+                if getattr(media_obj, "video_url", None):
+                    video_url = str(media_obj.video_url)
                 if getattr(media_obj, "thumbnail_url", None):
-                    return IgDirectItem(
-                        item_id=item_id,
-                        thread_id=thread_id,
-                        sender_user_id=sender_uid,
-                        item_type=IgItemType.PHOTO,
-                        raw_item_type=raw_type,
-                        text=msg_text,
-                        media_download_url=str(media_obj.thumbnail_url),
-                        replied_to_item_id=replied_to_id,
-                    )
+                    photo_url = str(media_obj.thumbnail_url)
+
+            if not video_url and not photo_url:
+                video_url, photo_url = self._resolve_raven_media_locked(
+                    thread_id, item_id, raw_item_dict
+                )
+
+            if video_url:
+                return IgDirectItem(
+                    item_id=item_id,
+                    thread_id=thread_id,
+                    sender_user_id=sender_uid,
+                    item_type=IgItemType.VIDEO,
+                    raw_item_type=raw_type,
+                    text=msg_text,
+                    media_download_url=video_url,
+                    replied_to_item_id=replied_to_id,
+                )
+
+            if photo_url:
+                return IgDirectItem(
+                    item_id=item_id,
+                    thread_id=thread_id,
+                    sender_user_id=sender_uid,
+                    item_type=IgItemType.PHOTO,
+                    raw_item_type=raw_type,
+                    text=msg_text,
+                    media_download_url=photo_url,
+                    replied_to_item_id=replied_to_id,
+                )
+
+            if raw_type in ("raven_media", "visual_media"):
+                return IgDirectItem(
+                    item_id=item_id,
+                    thread_id=thread_id,
+                    sender_user_id=sender_uid,
+                    item_type=IgItemType.RAVEN_EXPIRED,
+                    raw_item_type=raw_type,
+                    text=msg_text,
+                    replied_to_item_id=replied_to_id,
+                )
 
         # 5. Voice Message
         if raw_type == "voice_media":

@@ -311,7 +311,16 @@ async def _deliver_item_to_telegram(
         )
         return sent_msg.message_id
 
-    # 8. Unsupported attachment fallback
+    # 8. Expired View-Once Raven Media
+    if item.item_type == IgItemType.RAVEN_EXPIRED:
+        sent_msg = await bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=t("ig_in_raven_expired", sender=sender_escaped),
+            reply_to_message_id=reply_to_tg_id,
+        )
+        return sent_msg.message_id
+
+    # 9. Unsupported attachment fallback
     sent_msg = await bot.send_message(
         chat_id=OWNER_CHAT_ID,
         text=t(

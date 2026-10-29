@@ -13,6 +13,7 @@ class IgItemType(str, Enum):
     VIDEO = "video"
     VOICE = "voice"
     LINK = "link"
+    RAVEN_EXPIRED = "raven_expired"
     UNSUPPORTED = "unsupported"
 
 

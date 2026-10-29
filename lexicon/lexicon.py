@@ -73,6 +73,10 @@ LEXICON: Dict[str, str] = {
     "ig_in_video_caption": "📹 <b>Видео от @{sender}</b>{text_line}",
     "ig_in_voice_caption": "🎤 <b>Голосовое сообщение от @{sender}</b>",
     "ig_in_link": "🔗 <b>Ссылка от @{sender}:</b>\n{text}",
+    "ig_in_raven_expired": (
+        "💣 <b>Исчезающее фото/видео от @{sender}</b>\n"
+        "<i>Медиафайл с одноразовым просмотром уже был открыт в приложении Instagram или истек.</i>"
+    ),
     "ig_in_unsupported": (
         "📩 <b>Сообщение от @{sender}</b>\n"
         "<i>Тип вложения [{raw_type}] пока не отображается превью. Откройте Direct при необходимости.</i>"
