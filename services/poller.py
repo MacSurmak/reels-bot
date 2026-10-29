@@ -139,7 +139,7 @@ async def _deliver_item_to_telegram(
         )
         return sent_msg.message_id
 
-    # 2. Shared Feed Post
+    # 2. Shared Feed Post (Photo, Video, or Carousel)
     if item.item_type == IgItemType.POST:
         safe_url = html.escape(item.public_url or "https://www.instagram.com/")
         caption = t(
@@ -150,38 +150,60 @@ async def _deliver_item_to_telegram(
             url=safe_url,
         )
         if item.media_download_url:
-            temp_media_path: Optional[str] = None
             is_video = ".mp4" in item.media_download_url.lower()
-            ext = ".mp4" if is_video else ".jpg"
-            try:
-                temp_media_path = await asyncio.to_thread(
-                    ig_bridge.download_media_to_temp,
-                    item.media_download_url,
-                    item.item_id,
-                    ext,
-                )
-                if is_video:
+            if is_video:
+                prepared_post_vid: Optional[PreparedTelegramVideo] = None
+                try:
+                    prepared_post_vid = await asyncio.to_thread(
+                        ig_bridge.prepare_video_for_telegram,
+                        item,
+                    )
                     sent_msg = await bot.send_video(
                         chat_id=OWNER_CHAT_ID,
-                        video=FSInputFile(temp_media_path),
+                        video=FSInputFile(prepared_post_vid.video_path),
+                        thumbnail=(
+                            FSInputFile(prepared_post_vid.thumb_path)
+                            if prepared_post_vid.thumb_path
+                            else None
+                        ),
+                        width=prepared_post_vid.width,
+                        height=prepared_post_vid.height,
+                        duration=prepared_post_vid.duration,
                         caption=caption,
                         reply_to_message_id=reply_to_tg_id,
                         supports_streaming=True,
                     )
-                else:
+                    return sent_msg.message_id
+                except Exception as dl_err:
+                    logger.warning(
+                        f"Video download failed for post {item.item_id} ({dl_err}). Sending link card."
+                    )
+                finally:
+                    if prepared_post_vid is not None:
+                        _remove_temp_file_safely(prepared_post_vid.video_path)
+                        _remove_temp_file_safely(prepared_post_vid.thumb_path)
+            else:
+                temp_photo_post: Optional[str] = None
+                try:
+                    temp_photo_post = await asyncio.to_thread(
+                        ig_bridge.download_media_to_temp,
+                        item.media_download_url,
+                        item.item_id,
+                        ".jpg",
+                    )
                     sent_msg = await bot.send_photo(
                         chat_id=OWNER_CHAT_ID,
-                        photo=FSInputFile(temp_media_path),
+                        photo=FSInputFile(temp_photo_post),
                         caption=caption,
                         reply_to_message_id=reply_to_tg_id,
                     )
-                return sent_msg.message_id
-            except Exception as dl_err:
-                logger.warning(
-                    f"Media download failed for post {item.item_id} ({dl_err}). Sending link card."
-                )
-            finally:
-                _remove_temp_file_safely(temp_media_path)
+                    return sent_msg.message_id
+                except Exception as dl_err:
+                    logger.warning(
+                        f"Photo download failed for post {item.item_id} ({dl_err}). Sending link card."
+                    )
+                finally:
+                    _remove_temp_file_safely(temp_photo_post)
 
         sent_msg = await bot.send_message(
             chat_id=OWNER_CHAT_ID,

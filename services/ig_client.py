@@ -20,6 +20,7 @@ from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Optional, List, Tuple, Dict, Any
 import requests
+from PIL import Image
 from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
 from loguru import logger
@@ -444,12 +445,15 @@ class InstagramBridgeClient:
             return f"https://www.instagram.com/{prefix}/{code}/"
         return raw_url
 
-    def _resolve_video_url_from_public_link_locked(
+    def _resolve_media_from_public_link_locked(
         self, public_url: Optional[str]
-    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-        """Resolves direct CDN (video_url, caption, author) via authenticated mobile media_info_v1."""
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """
+        Resolves direct CDN (video_url, photo_url, caption, author) via authenticated mobile media_info_v1.
+        Supports single Reels, single photo posts, and multi-slide carousel posts.
+        """
         if not public_url:
-            return None, None, None
+            return None, None, None, None
 
         media_pk: Optional[int] = None
         id_match = MEDIA_ID_QUERY_REGEX.search(public_url)
@@ -466,32 +470,41 @@ class InstagramBridgeClient:
                     media_pk = int(self._client.media_pk_from_url(public_url))
 
         if not media_pk:
-            return None, None, None
+            return None, None, None, None
 
         try:
             info = self._client.media_info_v1(media_pk)
             video_url = (
                 str(info.video_url) if getattr(info, "video_url", None) else None
             )
-            if not video_url and getattr(info, "resources", None):
+            photo_url = (
+                str(info.thumbnail_url)
+                if getattr(info, "thumbnail_url", None)
+                else None
+            )
+
+            if getattr(info, "resources", None):
                 for res in info.resources:
-                    if getattr(res, "video_url", None):
+                    if not video_url and getattr(res, "video_url", None):
                         video_url = str(res.video_url)
+                    if not photo_url and getattr(res, "thumbnail_url", None):
+                        photo_url = str(res.thumbnail_url)
+                    if video_url or photo_url:
                         break
 
             caption = getattr(info, "caption_text", None)
             author = getattr(getattr(info, "user", None), "username", None)
             logger.info(
-                f"Resolved Reel media_pk={media_pk} via media_info_v1 "
-                f"(author=@{author}, has_video={bool(video_url)})"
+                f"Resolved media_pk={media_pk} via media_info_v1 "
+                f"(author=@{author}, has_video={bool(video_url)}, has_photo={bool(photo_url)})"
             )
-            return video_url, caption, author
+            return video_url, photo_url, caption, author
         except Exception as err:
             logger.warning(
-                f"Could not resolve direct video stream via media_info_v1 for '{public_url}' "
+                f"Could not resolve media via media_info_v1 for '{public_url}' "
                 f"(media_pk={media_pk}): {err}"
             )
-            return None, None, None
+            return None, None, None, None
 
     def _normalize_item_locked(
         self, msg: Any, thread_id: str, sender_uid: str
@@ -582,8 +595,8 @@ class InstagramBridgeClient:
                     author = str(xma_obj.header_title_text)
 
             if raw_public_url and not video_url:
-                resolved_v, resolved_c, resolved_a = (
-                    self._resolve_video_url_from_public_link_locked(raw_public_url)
+                resolved_v, _, resolved_c, resolved_a = (
+                    self._resolve_media_from_public_link_locked(raw_public_url)
                 )
                 video_url = video_url or resolved_v
                 caption = caption or resolved_c
@@ -640,11 +653,11 @@ class InstagramBridgeClient:
             )
             caption = getattr(share_obj, "caption_text", None) if share_obj else None
 
-            if raw_public_url and not media_url:
-                resolved_v, resolved_c, resolved_a = (
-                    self._resolve_video_url_from_public_link_locked(raw_public_url)
+            if raw_public_url:
+                resolved_v, resolved_p, resolved_c, resolved_a = (
+                    self._resolve_media_from_public_link_locked(raw_public_url)
                 )
-                media_url = media_url or resolved_v
+                media_url = resolved_v or resolved_p or media_url
                 caption = caption or resolved_c
                 author = author or resolved_a
 
@@ -820,6 +833,133 @@ class InstagramBridgeClient:
             )
             return sent_id
 
+    def send_direct_photo(self, thread_id: str, file_path: str) -> str:
+        """
+        Normalizes an image to RGB JPEG and sends it into the target Instagram Direct thread.
+        Returns the Instagram item_id of the sent photo message.
+        """
+        if not thread_id or not thread_id.strip():
+            raise ValueError("Parameter 'thread_id' cannot be empty.")
+        if not file_path or not os.path.exists(file_path):
+            raise ValueError(f"Photo file does not exist: '{file_path}'")
+
+        os.makedirs(TMP_MEDIA_DIR, exist_ok=True)
+        norm_jpg_path = f"{file_path}_norm.jpg"
+        try:
+            with Image.open(file_path) as img:
+                rgb_img = img.convert("RGB")
+                rgb_img.save(norm_jpg_path, format="JPEG", quality=92)
+
+            with self._lock:
+                if not self._is_authenticated:
+                    raise InstagramBridgeError(
+                        "Instagram client is not authenticated. Cannot send photo."
+                    )
+                sent_msg = self._client.direct_send_photo(
+                    path=norm_jpg_path,
+                    thread_ids=[int(thread_id)],
+                )
+
+            if not sent_msg or not getattr(sent_msg, "id", None):
+                raise InstagramBridgeError(
+                    "Instagram API returned an empty response when sending photo."
+                )
+
+            sent_id = str(sent_msg.id)
+            self._cache_client_context(
+                sent_id, getattr(sent_msg, "client_context", None)
+            )
+            return sent_id
+        except InstagramBridgeError:
+            raise
+        except Exception as err:
+            raise InstagramBridgeError(
+                f"Failed to send photo to Direct thread {thread_id}: {err}"
+            ) from err
+        finally:
+            if os.path.exists(norm_jpg_path):
+                try:
+                    os.remove(norm_jpg_path)
+                except OSError:
+                    pass
+
+    def send_direct_video(self, thread_id: str, file_path: str) -> str:
+        """
+        Normalizes an outgoing video via ffmpeg to H.264/AAC MP4 and sends it into Instagram Direct.
+        Returns the Instagram item_id of the sent video message.
+        """
+        if not thread_id or not thread_id.strip():
+            raise ValueError("Parameter 'thread_id' cannot be empty.")
+        if not file_path or not os.path.exists(file_path):
+            raise ValueError(f"Video file does not exist: '{file_path}'")
+
+        os.makedirs(TMP_MEDIA_DIR, exist_ok=True)
+        norm_mp4_path = f"{file_path}_out_h264.mp4"
+        try:
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                "-i",
+                file_path,
+                "-vf",
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "23",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                norm_mp4_path,
+            ]
+            subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=FFMPEG_TIMEOUT_SECONDS,
+                check=True,
+            )
+
+            with self._lock:
+                if not self._is_authenticated:
+                    raise InstagramBridgeError(
+                        "Instagram client is not authenticated. Cannot send video."
+                    )
+                sent_msg = self._client.direct_send_video(
+                    path=norm_mp4_path,
+                    thread_ids=[int(thread_id)],
+                )
+
+            if not sent_msg or not getattr(sent_msg, "id", None):
+                raise InstagramBridgeError(
+                    "Instagram API returned an empty response when sending video."
+                )
+
+            sent_id = str(sent_msg.id)
+            self._cache_client_context(
+                sent_id, getattr(sent_msg, "client_context", None)
+            )
+            return sent_id
+        except InstagramBridgeError:
+            raise
+        except Exception as err:
+            raise InstagramBridgeError(
+                f"Failed to send video to Direct thread {thread_id}: {err}"
+            ) from err
+        finally:
+            if os.path.exists(norm_mp4_path):
+                try:
+                    os.remove(norm_mp4_path)
+                except OSError:
+                    pass
+
     def download_media_to_temp(
         self, media_url: str, item_id: str, extension: str
     ) -> str:
@@ -974,8 +1114,8 @@ class InstagramBridgeClient:
                     f"Resolving video URL via media_info for '{item.public_url}'..."
                 )
                 with self._lock:
-                    resolved_url, _, _ = (
-                        self._resolve_video_url_from_public_link_locked(
+                    resolved_url, _, _, _ = (
+                        self._resolve_media_from_public_link_locked(
                             item.public_url
                         )
                     )
