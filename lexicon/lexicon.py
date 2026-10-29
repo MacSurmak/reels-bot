@@ -55,7 +55,7 @@ LEXICON: Dict[str, str] = {
     "ig_in_reel_caption": (
         "🎬 <b>Рилс от @{sender}</b>{author_line}\n"
         "{text_line}"
-        "🔗 <a href=\"{url}\">Открыть в Instagram</a>"
+        '🔗 <a href="{url}">Открыть в Instagram</a>'
     ),
     "ig_in_reel_fallback_link": (
         "🎬 <b>Рилс от @{sender}</b> (не удалось скачать видеофайл){author_line}\n"
@@ -65,7 +65,7 @@ LEXICON: Dict[str, str] = {
     "ig_in_post_caption": (
         "📸 <b>Пост от @{sender}</b>{author_line}\n"
         "{text_line}"
-        "🔗 <a href=\"{url}\">Открыть пост в Instagram</a>"
+        '🔗 <a href="{url}">Открыть пост в Instagram</a>'
     ),
     "ig_in_author_fmt": " (автор: <code>@{author}</code>)",
     "ig_in_text_fmt": "\n💬 <i>{text}</i>\n",

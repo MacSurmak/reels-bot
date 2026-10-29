@@ -43,9 +43,7 @@ from models import IgDirectItem, IgItemType, PreparedTelegramVideo
 from services.logger import setup_logger
 
 CLIENT_CONTEXT_CACHE_SIZE = 500
-REEL_CODE_REGEX = re.compile(
-    r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)"
-)
+REEL_CODE_REGEX = re.compile(r"instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)")
 MEDIA_ID_QUERY_REGEX = re.compile(r"[?&]id=(\d+)")
 
 
@@ -484,9 +482,7 @@ class InstagramBridgeClient:
             code_match = REEL_CODE_REGEX.search(public_url)
             if code_match:
                 try:
-                    media_pk = int(
-                        self._client.media_pk_from_code(code_match.group(1))
-                    )
+                    media_pk = int(self._client.media_pk_from_code(code_match.group(1)))
                 except Exception:
                     media_pk = int(self._client.media_pk_from_url(public_url))
 
@@ -668,9 +664,7 @@ class InstagramBridgeClient:
                 if clip_obj
                 else None
             )
-            raw_public_url = (
-                f"https://www.instagram.com/reel/{code}/" if code else None
-            )
+            raw_public_url = f"https://www.instagram.com/reel/{code}/" if code else None
             if not raw_public_url and self._is_instagram_webpage_url(raw_clip_video):
                 raw_public_url = raw_clip_video
 
@@ -737,9 +731,7 @@ class InstagramBridgeClient:
                 or getattr(msg, "xma_share", None)
             )
             code = getattr(share_obj, "code", None) if share_obj else None
-            raw_public_url = (
-                f"https://www.instagram.com/p/{code}/" if code else None
-            )
+            raw_public_url = f"https://www.instagram.com/p/{code}/" if code else None
 
             media_url = None
             if share_obj:
@@ -849,9 +841,7 @@ class InstagramBridgeClient:
             voice_url: Optional[str] = None
             voice_obj = getattr(msg, "voice_media", None)
             if isinstance(voice_obj, dict):
-                voice_url = (
-                    voice_obj.get("media", {}).get("audio", {}).get("audio_src")
-                )
+                voice_url = voice_obj.get("media", {}).get("audio", {}).get("audio_src")
             elif voice_obj is not None:
                 media_sub = getattr(voice_obj, "media", None)
                 audio_sub = getattr(media_sub, "audio", None) if media_sub else None
@@ -1216,9 +1206,7 @@ class InstagramBridgeClient:
             "duration": max(1, int(round(duration_sec))),
         }
 
-    def prepare_video_for_telegram(
-        self, item: IgDirectItem
-    ) -> PreparedTelegramVideo:
+    def prepare_video_for_telegram(self, item: IgDirectItem) -> PreparedTelegramVideo:
         """
         Downloads an Instagram Reel/Video, verifies its stream via ffprobe,
         transcodes VP9/AV1/HEVC streams into Telegram-compliant H.264 (yuv420p) + AAC + faststart,
@@ -1246,10 +1234,8 @@ class InstagramBridgeClient:
                     f"Resolving video URL via media_info for '{item.public_url}'..."
                 )
                 with self._lock:
-                    resolved_url, _, _, _ = (
-                        self._resolve_media_from_public_link_locked(
-                            item.public_url
-                        )
+                    resolved_url, _, _, _ = self._resolve_media_from_public_link_locked(
+                        item.public_url
                     )
                 if resolved_url and resolved_url != item.media_download_url:
                     if os.path.exists(raw_path):
@@ -1270,9 +1256,7 @@ class InstagramBridgeClient:
                 f"duration={probe['duration']}s"
             )
 
-            safe_id = "".join(
-                c for c in item.item_id if c.isalnum() or c in ("_", "-")
-            )
+            safe_id = "".join(c for c in item.item_id if c.isalnum() or c in ("_", "-"))
             norm_path = os.path.join(TMP_MEDIA_DIR, f"ig_{safe_id}_h264.mp4")
             thumb_path = os.path.join(TMP_MEDIA_DIR, f"ig_{safe_id}_thumb.jpg")
 

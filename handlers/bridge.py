@@ -71,7 +71,9 @@ async def handle_outgoing_message(message: types.Message) -> None:
             temp_file_path = os.path.join(
                 TMP_MEDIA_DIR, f"tg_out_{message.message_id}.jpg"
             )
-            await message.bot.download(largest_photo.file_id, destination=temp_file_path)
+            await message.bot.download(
+                largest_photo.file_id, destination=temp_file_path
+            )
 
             sent_ig_item_id = await asyncio.to_thread(
                 ig_bridge.send_direct_photo,
@@ -136,9 +138,7 @@ async def handle_outgoing_message(message: types.Message) -> None:
             f"item #{sent_ig_item_id} (reply_to={reply_to_ig_item_id})"
         )
 
-        await message.react(
-            [types.ReactionTypeEmoji(emoji=t("tg_out_reaction_ok"))]
-        )
+        await message.react([types.ReactionTypeEmoji(emoji=t("tg_out_reaction_ok"))])
     except Exception as err:
         logger.exception(
             f"Failed to send Telegram message #{message.message_id} to Instagram Direct: {err}"

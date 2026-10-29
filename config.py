@@ -53,16 +53,22 @@ def load_and_validate_config() -> Dict[str, Any]:
         config = yaml.safe_load(f)
 
     if not isinstance(config, dict):
-        raise ConfigurationError("Configuration file must contain a valid YAML mapping.")
+        raise ConfigurationError(
+            "Configuration file must contain a valid YAML mapping."
+        )
 
     # 1. Validate Telegram section
     telegram = config.get("telegram")
     if not isinstance(telegram, dict):
-        raise ConfigurationError("Missing or invalid 'telegram' section in config.yaml.")
+        raise ConfigurationError(
+            "Missing or invalid 'telegram' section in config.yaml."
+        )
 
     bot_token = telegram.get("bot_token")
     if not isinstance(bot_token, str) or not bot_token.strip():
-        raise ConfigurationError("Missing or empty 'telegram.bot_token' in config.yaml.")
+        raise ConfigurationError(
+            "Missing or empty 'telegram.bot_token' in config.yaml."
+        )
 
     owner_id = telegram.get("owner_id")
     if not isinstance(owner_id, int) or isinstance(owner_id, bool) or owner_id <= 0:
@@ -73,7 +79,9 @@ def load_and_validate_config() -> Dict[str, Any]:
     # 2. Validate Instagram section
     instagram = config.get("instagram")
     if not isinstance(instagram, dict):
-        raise ConfigurationError("Missing or invalid 'instagram' section in config.yaml.")
+        raise ConfigurationError(
+            "Missing or invalid 'instagram' section in config.yaml."
+        )
 
     for field in ("username", "password", "target_username"):
         val = instagram.get(field)
@@ -94,7 +102,10 @@ def load_and_validate_config() -> Dict[str, Any]:
         raise ConfigurationError("Missing or invalid 'polling' section in config.yaml.")
 
     interval = polling.get("interval_seconds")
-    if not isinstance(interval, (int, float)) or float(interval) < MIN_POLL_INTERVAL_SECONDS:
+    if (
+        not isinstance(interval, (int, float))
+        or float(interval) < MIN_POLL_INTERVAL_SECONDS
+    ):
         raise ConfigurationError(
             f"Parameter 'polling.interval_seconds' must be a number >= {MIN_POLL_INTERVAL_SECONDS}."
         )

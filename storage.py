@@ -49,8 +49,7 @@ async def init_db() -> aiosqlite.Connection:
     await _DB_CONN.execute("PRAGMA synchronous=NORMAL;")
     await _DB_CONN.execute("PRAGMA foreign_keys=ON;")
 
-    await _DB_CONN.execute(
-        """
+    await _DB_CONN.execute("""
         CREATE TABLE IF NOT EXISTS message_mappings (
             tg_message_id INTEGER PRIMARY KEY,
             ig_item_id TEXT NOT NULL UNIQUE,
@@ -59,30 +58,23 @@ async def init_db() -> aiosqlite.Connection:
             item_type TEXT NOT NULL,
             created_at INTEGER NOT NULL
         );
-        """
-    )
-    await _DB_CONN.execute(
-        """
+        """)
+    await _DB_CONN.execute("""
         CREATE INDEX IF NOT EXISTS idx_mappings_ig_item
         ON message_mappings (ig_item_id);
-        """
-    )
-    await _DB_CONN.execute(
-        """
+        """)
+    await _DB_CONN.execute("""
         CREATE INDEX IF NOT EXISTS idx_mappings_created_at
         ON message_mappings (created_at);
-        """
-    )
+        """)
 
-    await _DB_CONN.execute(
-        """
+    await _DB_CONN.execute("""
         CREATE TABLE IF NOT EXISTS sync_state (
             state_key TEXT PRIMARY KEY,
             state_value TEXT NOT NULL,
             updated_at INTEGER NOT NULL
         );
-        """
-    )
+        """)
 
     await _DB_CONN.commit()
     logger.info("SQLite WAL schema initialized and verified successfully.")

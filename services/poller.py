@@ -48,7 +48,9 @@ def _remove_temp_file_safely(file_path: Optional[str]) -> None:
         try:
             os.remove(file_path)
         except OSError as err:
-            logger.warning(f"Failed to remove temporary media file '{file_path}': {err}")
+            logger.warning(
+                f"Failed to remove temporary media file '{file_path}': {err}"
+            )
 
 
 def _truncate_and_escape(raw_text: Optional[str], max_chars: int) -> str:

@@ -30,9 +30,7 @@ async def handle_status(message: types.Message) -> None:
     stats = await get_bridge_stats()
     is_ok, detail = ig_bridge.check_health()
 
-    ig_status_str = (
-        t("status_ig_ok") if is_ok else t("status_ig_error", error=detail)
-    )
+    ig_status_str = t("status_ig_ok") if is_ok else t("status_ig_error", error=detail)
     thread_id_str = stats["target_thread_id"] or t("status_not_initialized")
     last_item_str = stats["last_seen_item_id"] or t("status_not_initialized")
 
